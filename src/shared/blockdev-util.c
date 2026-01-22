@@ -307,6 +307,48 @@ int block_get_originating(dev_t dt, dev_t *ret) {
         return sd_device_get_devnum(origin, ret);
 }
 
+int block_device_resolve_underlying(dev_t *ret) {
+        dev_t d;
+
+        assert(ret);
+        d = *ret;
+
+        for (;;) {
+                _cleanup_free_ char *slaves_dir = NULL;
+                _cleanup_closedir_ DIR *dir = NULL;
+                bool resolved = false;
+
+                if (asprintf(&slaves_dir, "/sys/dev/block/%u:%u/slaves", major(d), minor(d)) < 0)
+                        return -ENOMEM;
+
+                dir = opendir(slaves_dir);
+                if (!dir)
+                        break;
+
+                FOREACH_DIRENT(de, dir, return -errno) {
+                        _cleanup_(sd_device_unrefp) sd_device *slave = NULL;
+                        dev_t slave_devno;
+
+                        if (sd_device_new_from_subsystem_sysname(&slave, "block", de->d_name) < 0)
+                                continue;
+
+                        if (sd_device_get_devnum(slave, &slave_devno) < 0)
+                                continue;
+
+                        d = slave_devno;
+                        log_debug("Resolved to underlying device: %s", de->d_name);
+                        resolved = true;
+                        break;
+                }
+
+                if (!resolved)
+                        break;
+        }
+
+        *ret = d;
+        return 0;
+}
+
 int get_block_device_harder_fd(int fd, dev_t *ret) {
         int r;
 
