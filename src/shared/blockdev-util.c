@@ -24,6 +24,10 @@
 #include "path-util.h"
 #include "string-util.h"
 
+#if HAVE_BLKID
+#include "blkid-util.h"
+#endif
+
 static int fd_get_devnum(int fd, BlockDeviceLookupFlags flags, dev_t *ret) {
         struct stat st;
         dev_t devnum;
@@ -218,6 +222,11 @@ int block_get_whole_disk(dev_t d, dev_t *ret) {
         if (major(d) == 0)
                 return -ENODEV;
 
+        /* Resolve through device-mapper layers */
+        r = block_device_resolve_underlying(&d);
+        if (r < 0)
+                log_debug_errno(r, "Failed to resolve underlying device, ignoring: %m");
+
         /* If it has a queue this is good enough for us */
         xsprintf_sys_block_path(p, "/queue", d);
         if (access(p, F_OK) >= 0) {
@@ -226,6 +235,19 @@ int block_get_whole_disk(dev_t d, dev_t *ret) {
         }
         if (errno != ENOENT)
                 return -errno;
+
+#if HAVE_BLKID
+        /* Check if current device has GPT (subpartition case) */
+        r = dlopen_libblkid();
+        if (r >= 0) {
+                _cleanup_free_ char *node = NULL;
+                r = devname_from_devnum(S_IFBLK, d, &node);
+                if (r >= 0 && blkid_device_has_gpt(node) > 0) {
+                        *ret = d;
+                        return 1;
+                }
+        }
+#endif
 
         /* If it is a partition find the originating device */
         xsprintf_sys_block_path(p, "/partition", d);
@@ -241,6 +263,22 @@ int block_get_whole_disk(dev_t d, dev_t *ret) {
         r = parse_devnum(s, &devt);
         if (r < 0)
                 return r;
+
+#if HAVE_BLKID
+        /* Check if resolved device has GPT and if so, it's the "whole disk" */
+        r = dlopen_libblkid();
+        if (r >= 0) {
+                _cleanup_free_ char *node = NULL;
+                r = devname_from_devnum(S_IFBLK, devt, &node);
+                if (r >= 0) {
+                        r = blkid_device_has_gpt(node);
+                        if (r > 0) {
+                                *ret = devt;
+                                return 1;
+                        }
+                }
+        }
+#endif
 
         /* Only return this if it is really good enough for us. */
         xsprintf_sys_block_path(p, "/queue", devt);
