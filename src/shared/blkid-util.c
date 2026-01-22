@@ -120,6 +120,31 @@ int blkid_partition_get_type_id128(blkid_partition p, sd_id128_t *ret) {
         return sd_id128_from_string(s, ret);
 }
 
+int blkid_device_has_gpt(const char *path) {
+        assert(path);
+
+        _cleanup_(blkid_free_probep) blkid_probe probe = NULL;
+        const char *pttype = NULL;
+        int r;
+
+        probe = sym_blkid_new_probe_from_filename(path);
+        if (!probe)
+                return -errno;
+
+        sym_blkid_probe_enable_partitions(probe, 1);
+        sym_blkid_probe_set_partitions_flags(probe, BLKID_PARTS_ENTRY_DETAILS);
+
+        r = sym_blkid_do_fullprobe(probe);
+        if (r < 0)
+                return r;
+
+        r = sym_blkid_probe_lookup_value(probe, "PTTYPE", &pttype, NULL);
+        if (r < 0)
+                return 0; /* no partition table */
+
+        return streq(pttype, "gpt") ? 1 : 0;
+}
+
 int blkid_probe_lookup_value_id128(blkid_probe b, const char *field, sd_id128_t *ret) {
         assert(b);
         assert(field);

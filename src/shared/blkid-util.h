@@ -54,6 +54,8 @@ int blkid_partition_get_uuid_id128(blkid_partition p, sd_id128_t *ret);
 
 int blkid_partition_get_type_id128(blkid_partition p, sd_id128_t *ret);
 
+int blkid_device_has_gpt(const char *path);
+
 /* Define symbolic names for blkid_do_safeprobe() return values, since blkid only uses literal numbers. We
  * prefix these symbolic definitions with underscores, to not invade libblkid's namespace needlessly. */
 enum {
