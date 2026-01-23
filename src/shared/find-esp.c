@@ -11,6 +11,7 @@
 
 #include "alloc-util.h"
 #include "blkid-util.h"
+#include "blockdev-util.h"
 #include "btrfs-util.h"
 #include "chase.h"
 #include "device-util.h"
@@ -18,6 +19,7 @@
 #include "env-util.h"
 #include "errno-util.h"
 #include "fd-util.h"
+#include "fileio.h"
 #include "find-esp.h"
 #include "mount-util.h"
 #include "parse-util.h"
@@ -55,6 +57,98 @@ static VerifyESPFlags verify_esp_flags_init(int unprivileged_mode, const char *e
                 flags |= VERIFY_ESP_SKIP_DEVICE_CHECK;
 
         return flags;
+}
+
+static int verify_esp_subpartition(
+                dev_t devid,
+                const char *node,
+                VerifyESPFlags flags,
+                uint32_t *ret_part,
+                uint64_t *ret_pstart,
+                uint64_t *ret_psize,
+                sd_id128_t *ret_uuid) {
+
+        _cleanup_free_ char *dm_name = NULL, *parent_node = NULL;
+        _cleanup_(blkid_free_probep) blkid_probe parent_probe = NULL;
+        char sysfs_path[STRLEN("/sys/dev/block/") + DECIMAL_STR_MAX(dev_t)*2 + STRLEN("/dm/name")];
+        bool searching = FLAGS_SET(flags, VERIFY_ESP_SEARCHING);
+        blkid_partlist pl;
+        blkid_partition pp;
+        unsigned long partno;
+        sd_id128_t type_id;
+        const char *p;
+        dev_t underlying;
+        int r;
+
+        /* FIXME: Get dm device name to extract partition number */
+        xsprintf(sysfs_path, "/sys/dev/block/%u:%u/dm/name", major(devid), minor(devid));
+        r = read_one_line_file(sysfs_path, &dm_name);
+        if (r < 0)
+                return r;
+
+        /* FIXME: Parse partition number from "sda17p1" */
+        p = strrchr(dm_name, 'p');
+        if (!p)
+                return -EINVAL;
+
+        r = safe_atolu(p + 1, &partno);
+        if (r < 0 || partno == 0)
+                return -EINVAL;
+
+        /* Get parent device through dm layers */
+        underlying = devid;
+        r = block_device_resolve_underlying(&underlying);
+        if (r < 0)
+                return r;
+
+        r = devname_from_devnum(S_IFBLK, underlying, &parent_node);
+        if (r < 0)
+                return r;
+
+        /* Probe parent GPT */
+        parent_probe = sym_blkid_new_probe_from_filename(parent_node);
+        if (!parent_probe)
+                return -errno;
+
+        sym_blkid_probe_enable_partitions(parent_probe, 1);
+        sym_blkid_probe_set_partitions_flags(parent_probe, BLKID_PARTS_ENTRY_DETAILS);
+
+        r = sym_blkid_do_safeprobe(parent_probe);
+        if (r != 0)
+                return -ENODEV;
+
+        pl = sym_blkid_probe_get_partitions(parent_probe);
+        if (!pl)
+                return -ENODEV;
+
+        pp = sym_blkid_partlist_get_partition(pl, partno - 1);
+        if (!pp)
+                return -ENODEV;
+
+        /* Verify ESP type */
+        r = blkid_partition_get_type_id128(pp, &type_id);
+        if (r < 0)
+                return r;
+
+        if (!sd_id128_equal(type_id, SD_GPT_ESP))
+                return log_full_errno(searching ? LOG_DEBUG : LOG_ERR,
+                                      SYNTHETIC_ERRNO(searching ? EADDRNOTAVAIL : ENODEV),
+                                      "File system \"%s\" has wrong type for an EFI System Partition (ESP).", node);
+
+        /* Return partition metadata */
+        if (ret_part)
+                *ret_part = sym_blkid_partition_get_partno(pp);
+        if (ret_pstart)
+                *ret_pstart = sym_blkid_partition_get_start(pp);
+        if (ret_psize)
+                *ret_psize = sym_blkid_partition_get_size(pp);
+        if (ret_uuid) {
+                r = blkid_partition_get_uuid_id128(pp, ret_uuid);
+                if (r < 0)
+                        *ret_uuid = SD_ID128_NULL;
+        }
+
+        return 0;
 }
 
 static int verify_esp_blkid(
@@ -114,10 +208,15 @@ static int verify_esp_blkid(
                                       "File system \"%s\" is not FAT.", node);
 
         r = sym_blkid_probe_lookup_value(b, "PART_ENTRY_SCHEME", &v, NULL);
-        if (r != 0)
+        if (r != 0) {
+                r = verify_esp_subpartition(devid, node, flags, ret_part, ret_pstart, ret_psize, ret_uuid);
+                if (r >= 0)
+                        return 0;
+
                 return log_full_errno(searching ? LOG_DEBUG : LOG_ERR,
                                       SYNTHETIC_ERRNO(searching ? EADDRNOTAVAIL : ENODEV),
                                       "File system \"%s\" is not located on a partitioned block device.", node);
+        }
         if (!streq(v, "gpt"))
                 return log_full_errno(searching ? LOG_DEBUG : LOG_ERR,
                                       SYNTHETIC_ERRNO(searching ? EADDRNOTAVAIL : ENODEV),
