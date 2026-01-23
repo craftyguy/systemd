@@ -684,6 +684,27 @@ static int make_partition_devname(
         assert(nr != 0); /* zero is not a valid partition nr */
         assert(ret);
 
+        /* Subpartitions don't have diskseq entries, so we must use direct paths. This only looks in
+        * /dev/mapper, for subpartitions mapped by kpartx */
+        _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
+        if (sd_device_new_from_devname(&dev, whole_devname) >= 0 &&
+            block_device_is_whole_disk(dev) <= 0) {
+                _cleanup_free_ char *name = NULL;
+                r = path_extract_filename(whole_devname, &name);
+                if (r < 0)
+                        return r;
+
+                if (nr < 0)
+                        r = asprintf(&s, "/dev/mapper/%s", name);
+                else
+                        r = asprintf(&s, "/dev/mapper/%sp%i", name, nr);
+                if (r < 0)
+                        return -ENOMEM;
+
+                *ret = TAKE_PTR(s);
+                return 0;
+        }
+
         r = diskseq_should_be_used(whole_devname, diskseq, flags);
         if (r < 0)
                 log_debug_errno(r, "Failed to determine if diskseq should be used for %s, assuming no, ignoring: %m", whole_devname);
